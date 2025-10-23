@@ -1,11 +1,9 @@
 // =============================================================================
-// === PAMETNO OSVJETLJENJE - FIRMWARE v1.0 =====================================
+// === PAMETNO OSVJETLJENJE - FIRMWARE v2.2 (Captive Portal) ====================
 // =============================================================================
 // Autor: Dejan Habijanec & Gemini AI
-// Datum: 22.10.2025.
-// Opis: Finalna, stabilna verzija s potpunim web sučeljem i spremanjem
-//       postavki u SPIFFS. Koristi provjerenu metodu za stabilnost
-//       s Watchdog Timerom.
+// Datum: 23.10.2025.
+// Opis: Dodana funkcionalnost Captive Portala za automatsko otvaranje UI.
 // =============================================================================
 
 // --- Biblioteke ---
@@ -18,37 +16,28 @@
 #include <ArduinoJson.h>
 #include <SPIFFS.h>
 
-// --- Konfiguracija za Watchdog (Tvoja provjerena metoda) ---
+// --- Konfiguracija za Watchdog ---
 const esp_task_wdt_config_t wdt_config = {
-  .timeout_ms = 10000, // 10 sekundi timeout
+  .timeout_ms = 10000,
   .idle_core_mask = 0,
   .trigger_panic = true
 };
 
 // --- Hardverski Pinovi ---
-// Senzori (UART)
-#define RX_PIN_A 13 // Za V2 pločicu
-#define TX_PIN_A 12 // Za V2 pločicu
-#define RX_PIN_B 10 // Port koji radi na V1
-#define TX_PIN_B 11 // Port koji radi na V1
-// LED Trake
+#define RX_PIN_B 10
+#define TX_PIN_B 11
 #define LED_PIN_A 1
 #define LED_PIN_B 2
-// Taster (za V2 pločicu)
-#define TASTER_PIN 7
 
-// Serijski portovi za senzore
-HardwareSerial SensorSerialA(2);
 HardwareSerial SensorSerialB(1);
 
 // --- Postavke LED Traka ---
-#define MAX_LEDS 300 // Maksimalan broj LED-ica koji podržavamo po traci
+#define MAX_LEDS 300
 
 CRGB ledsA[MAX_LEDS];
 CRGB ledsB[MAX_LEDS];
 
-// --- Struktura za spremanje postavki ---
-// Koristimo strukturu da sve bude organizirano
+// --- Struktura za postavke ---
 struct StripSettings {
   bool enabled = false;
   String type = "ws2812b";
@@ -61,6 +50,7 @@ struct StripSettings {
   int wipeSpeed = 50;
   int onTime = 5;
   String effect = "solid";
+  String colorHex = "#0000FF";
   CRGB color = CRGB::Blue;
   int colorTemp = 4000;
   uint8_t brightness = 80;
@@ -71,12 +61,8 @@ String mainMode = "auto";
 StripSettings strip1_settings;
 StripSettings strip2_settings;
 
-// Varijable za rad u loop-u
-String lineBufferA = "";
 String lineBufferB = "";
-int currentDistanceA = 0;
 int currentDistanceB = 0;
-unsigned long lastMotionTimeA = 0;
 unsigned long lastMotionTimeB = 0;
 
 // --- WiFi i Server ---
@@ -84,596 +70,11 @@ const char* ssid = "Pametno_Svjetlo_Setup";
 WebServer server(80);
 DNSServer dnsServer;
 
-
 // =============================================================================
-// === HTML, CSS & JavaScript KOD ZA KORISNIČKO SUČELJE =========================
-// =============================================================================
-const char HTML_PROGMEM[] = R"rawliteral(
-<!DOCTYPE html>
-<html lang="hr">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Postavke Svjetla</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --background-color: #121212;
-            --surface-color: #1e1e1e;
-            --primary-color: #bb86fc;
-            --primary-variant-color: #a166f7;
-            --secondary-color: #03dac6;
-            --text-color: #e0e0e0;
-            --control-background: #333;
-            --border-color: #444;
-        }
-        body {
-            font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background-color: var(--background-color);
-            color: var(--text-color);
-            display: flex;
-            justify-content: center;
-            align-items: flex-start;
-            min-height: 100vh;
-            margin: 0;
-            padding: 20px;
-            box-sizing: border-box;
-        }
-        .container {
-            background-color: var(--surface-color);
-            padding: 25px;
-            border-radius: 16px;
-            box-shadow: 0 8px 30px rgba(0,0,0,0.5);
-            width: 100%;
-            max-width: 450px;
-        }
-        .header {
-            text-align: center;
-            margin-bottom: 30px;
-        }
-        .language-dropdown {
-            position: relative;
-            display: inline-block;
-            margin-top: 15px;
-        }
-        .language-selector-btn {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            background-color: transparent;
-            border: 1px solid var(--border-color);
-            color: #aaa;
-            padding: 8px 15px;
-            border-radius: 20px;
-            cursor: pointer;
-            font-size: 14px;
-            transition: background-color 0.2s, color 0.2s;
-        }
-        .language-selector-btn:hover {
-            background-color: var(--control-background);
-            color: var(--text-color);
-        }
-        .language-selector-btn .globe-icon {
-            width: 18px;
-            height: 18px;
-            stroke: currentColor;
-        }
-        .language-selector-btn .arrow {
-            font-size: 10px;
-            transition: transform 0.2s;
-        }
-        .language-menu {
-            display: none;
-            position: absolute;
-            top: 120%;
-            left: 50%;
-            transform: translateX(-50%);
-            background-color: var(--control-background);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            padding: 5px;
-            z-index: 10;
-            min-width: 130px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.4);
-        }
-        .language-menu a {
-            color: var(--text-color);
-            text-decoration: none;
-            display: block;
-            padding: 8px 12px;
-            border-radius: 5px;
-        }
-        .language-menu a:hover {
-            background-color: var(--primary-color);
-            color: var(--background-color);
-        }
-        .language-menu.show { display: block; }
-        .language-selector-btn.open .arrow { transform: rotate(180deg); }
-        
-        h1, h2, h3 {
-            text-align: center;
-            margin-top: 0;
-            font-weight: 700;
-        }
-        h1 { color: var(--primary-color); margin-bottom: 5px; font-size: 28px; }
-        h2 {
-            color: var(--secondary-color);
-            margin-top: 30px;
-            margin-bottom: 20px;
-            border-top: 1px solid var(--border-color);
-            padding-top: 25px;
-        }
-        h3 { color: var(--text-color); font-weight: 500; margin-bottom: 20px; border-top: 1px solid var(--border-color); padding-top: 25px;}
-        .control-group { margin-bottom: 25px; }
-        label, .label-span { display: block; margin-bottom: 10px; font-weight: 500; }
-        select, input[type="number"], input[type="color"], input[type="range"] {
-            width: 100%;
-            padding: 12px;
-            background-color: var(--control-background);
-            color: var(--text-color);
-            border: 1px solid var(--border-color);
-            border-radius: 8px;
-            font-size: 16px;
-            box-sizing: border-box;
-        }
-        input[type="range"] { padding: 0; }
-        .dynamic-options { display: none; margin-top: 20px; }
-        .strip-settings {
-            display: none;
-            opacity: 0;
-            transition: opacity 0.5s ease-in-out;
-            overflow: hidden;
-            max-height: 0;
-        }
-        .strip-settings.visible {
-            display: block;
-            opacity: 1;
-            max-height: 2000px;
-            transition: opacity 0.5s ease-in-out, max-height 1s ease-in-out;
-        }
-        button {
-            width: 100%;
-            padding: 15px;
-            background-color: var(--primary-color);
-            color: var(--background-color);
-            border: none;
-            border-radius: 8px;
-            font-size: 18px;
-            font-weight: bold;
-            cursor: pointer;
-            transition: background-color 0.2s;
-            -webkit-tap-highlight-color: transparent;
-            margin-top: 20px;
-        }
-        .copy-button {
-             background-color: var(--secondary-color);
-             font-size: 14px;
-             padding: 10px;
-             margin-bottom: 20px;
-        }
-        button:active { background-color: var(--primary-variant-color); }
-        .status { text-align: center; margin-top: 20px; color: var(--secondary-color); height: 20px; font-weight: 500; }
-        .range-value { font-weight: normal; color: #aaa; margin-left: 10px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1 data-lang="mainTitle">Postavke Osvjetljenja</h1>
-             <div class="language-dropdown">
-                <button id="language-selector-btn" class="language-selector-btn" onclick="toggleLanguageMenu()">
-                    <svg class="globe-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>
-                    <span id="current-lang-text">Hrvatski</span>
-                    <span class="arrow">▼</span>
-                </button>
-                <div id="language-menu" class="language-menu">
-                    <a href="#" onclick="changeLanguage('hr'); return false;">🇭🇷 Hrvatski</a>
-                    <a href="#" onclick="changeLanguage('en'); return false;">🇬🇧 English</a>
-                </div>
-            </div>
-        </div>
-        
-        <h3 data-lang="globalSettings">Globalne Postavke</h3>
-        <div class="control-group">
-            <label for="mainMode" data-lang="mainMode">Glavni način rada</label>
-            <select id="mainMode">
-                <option value="auto" selected data-lang="mainModeAuto">Automatski (preko senzora)</option>
-                <option value="on" data-lang="mainModeOn">Uvijek upaljeno (Ambijentalni)</option>
-                <option value="off" data-lang="mainModeOff">Uvijek ugašeno</option>
-            </select>
-        </div>
-
-        <div class="control-group">
-            <label for="stripCount" data-lang="stripCountLabel">Koliko LED traka koristite?</label>
-            <select id="stripCount" onchange="updateUI()">
-                <option value="0" data-lang="selectOption">Odaberi...</option>
-                <option value="1" data-lang="oneStrip">Jedna traka</option>
-                <option value="2" data-lang="twoStrips">Dvije trake</option>
-            </select>
-        </div>
-        
-        <div id="strip1Settings" class="strip-settings">
-            <h2 data-lang="strip1Title">Postavke za Traku 1</h2>
-            <h3 data-lang="physicalSettings">Fizičke Postavke</h3>
-            <div class="control-group">
-                <label for="strip1Type" data-lang="stripType">Tip trake</label>
-                <select id="strip1Type" onchange="updateUI()">
-                    <option value="none" data-lang="selectType">Odaberi tip...</option>
-                    <option value="ws2812b">RGB (WS2812B)</option>
-                    <option value="white" data-lang="whiteStrip">Jednobojna Bijela</option>
-                </select>
-            </div>
-            <div class="control-group">
-                <label for="strip1Length" data-lang="stripLength">Dužina trake (m)</label>
-                <input type="number" id="strip1Length" min="1" max="20" value="4">
-            </div>
-            <div class="control-group">
-                <label for="strip1Density" data-lang="stripDensity">Gustoća LED-ica (LED/m)</label>
-                <select id="strip1Density">
-                    <option value="30">30 LED/m</option>
-                    <option value="60" selected>60 LED/m</option>
-                    <option value="144">144 LED/m</option>
-                </select>
-            </div>
-            <div class="control-group">
-                <label for="strip1Offset" data-lang="sensorOffset">Pomak senzora (cm)</label>
-                <input type="number" id="strip1Offset" value="0">
-            </div>
-            
-            <div id="strip1DynamicOptions" class="dynamic-options">
-                <h3 data-lang="behaviorSettings">Ponašanje Senzora</h3>
-                <div class="control-group">
-                    <label for="strip1Mode" data-lang="activationMode">Način paljenja</label>
-                    <select id="strip1Mode" onchange="updateUI()">
-                        <option value="fill" data-lang="modeFill">Cijela traka do korisnika</option>
-                        <option value="follow" data-lang="modeFollow">Prati korisnika</option>
-                        <option value="depart" data-lang="modeDepart">Odlazak (pali se ispred)</option>
-                    </select>
-                </div>
-                <div id="strip1FollowOptions" class="dynamic-options">
-                     <div class="control-group">
-                        <label for="strip1FollowWidth" data-lang="segmentWidth">Širina segmenta (broj LED-ica)</label>
-                        <input type="number" id="strip1FollowWidth" min="1" max="50" value="20">
-                    </div>
-                </div>
-                <div class="control-group">
-                    <label for="strip1WipeSpeed" data-lang="animationSpeed">Brzina animacije (ms)</label>
-                    <input type="number" id="strip1WipeSpeed" value="50" min="1">
-                </div>
-                <div class="control-group">
-                    <label for="strip1OnTime" data-lang="turnOffTime">Vrijeme gašenja (sek)</label>
-                    <input type="number" id="strip1OnTime" value="5" min="0">
-                </div>
-
-                <h3 data-lang="appearanceSettings">Izgled i Efekti</h3>
-                <div id="strip1RgbOptions" class="dynamic-options">
-                    <div class="control-group">
-                        <label for="strip1Effect" data-lang="effect">Efekt</label>
-                        <select id="strip1Effect" onchange="updateUI()">
-                            <option value="solid" data-lang="effectSolid">Statična Boja</option>
-                            <option value="rainbow" data-lang="effectRainbow">Duga</option>
-                            <option value="meteor" data-lang="effectMeteor">Meteor Kiša</option>
-                            <option value="fire" data-lang="effectFire">Vatra</option>
-                        </select>
-                    </div>
-                    <div id="strip1ColorContainer" class="control-group">
-                        <label for="strip1Color" data-lang="color">Boja</label>
-                        <input type="color" id="strip1Color" value="#0000FF">
-                    </div>
-                </div>
-                <div id="strip1WhiteOptions" class="dynamic-options">
-                    <div class="control-group">
-                        <label for="strip1Temp" data-lang="colorTemp">Temperatura Boje <span id="strip1TempValue" class="range-value">4000K</span></label>
-                        <input type="range" id="strip1Temp" min="2700" max="6500" value="4000" oninput="updateRangeValue('strip1TempValue', this.value + 'K')">
-                    </div>
-                </div>
-                <div class="control-group">
-                    <label for="strip1Brightness" data-lang="brightness">Svjetlina <span id="strip1BrightnessValue" class="range-value">80</span></label>
-                    <input type="range" id="strip1Brightness" min="10" max="255" value="80" oninput="updateRangeValue('strip1BrightnessValue', this.value)">
-                </div>
-            </div>
-        </div>
-
-        <div id="strip2Settings" class="strip-settings">
-            <h2 data-lang="strip2Title">Postavke za Traku 2</h2>
-            <button class="copy-button" onclick="copySettings(1, 2)" data-lang="copyButton">Kopiraj postavke s Trake 1</button>
-            <h3 data-lang="physicalSettings">Fizičke Postavke</h3>
-            <div class="control-group">
-                <label for="strip2Type" data-lang="stripType">Tip trake</label>
-                <select id="strip2Type" onchange="updateUI()">
-                    <option value="none" data-lang="selectType">Odaberi tip...</option>
-                    <option value="ws2812b">RGB (WS2812B)</option>
-                    <option value="white" data-lang="whiteStrip">Jednobojna Bijela</option>
-                </select>
-            </div>
-            <div class="control-group">
-                <label for="strip2Length" data-lang="stripLength">Dužina trake (m)</label>
-                <input type="number" id="strip2Length" min="1" max="20" value="4">
-            </div>
-            <div class="control-group">
-                <label for="strip2Density" data-lang="stripDensity">Gustoća LED-ica (LED/m)</label>
-                <select id="strip2Density">
-                    <option value="30">30 LED/m</option>
-                    <option value="60" selected>60 LED/m</option>
-                    <option value="144">144 LED/m</option>
-                </select>
-            </div>
-            <div class="control-group">
-                <label for="strip2Offset" data-lang="sensorOffset">Pomak senzora (cm)</label>
-                <input type="number" id="strip2Offset" value="0">
-            </div>
-            
-             <div id="strip2DynamicOptions" class="dynamic-options">
-                <h3 data-lang="behaviorSettings">Ponašanje Senzora</h3>
-                <div class="control-group">
-                    <label for="strip2Mode" data-lang="activationMode">Način paljenja</label>
-                    <select id="strip2Mode" onchange="updateUI()">
-                        <option value="fill" data-lang="modeFill">Cijela traka do korisnika</option>
-                        <option value="follow" data-lang="modeFollow">Prati korisnika</option>
-                        <option value="depart" data-lang="modeDepart">Odlazak (pali se ispred)</option>
-                    </select>
-                </div>
-                <div id="strip2FollowOptions" class="dynamic-options">
-                     <div class="control-group">
-                        <label for="strip2FollowWidth" data-lang="segmentWidth">Širina segmenta (broj LED-ica)</label>
-                        <input type="number" id="strip2FollowWidth" min="1" max="50" value="20">
-                    </div>
-                </div>
-                <div class="control-group">
-                    <label for="strip2WipeSpeed" data-lang="animationSpeed">Brzina animacije (ms)</label>
-                    <input type="number" id="strip2WipeSpeed" value="50" min="1">
-                </div>
-                <div class="control-group">
-                    <label for="strip2OnTime" data-lang="turnOffTime">Vrijeme gašenja (sek)</label>
-                    <input type="number" id="strip2OnTime" value="5" min="0">
-                </div>
-                
-                <h3 data-lang="appearanceSettings">Izgled i Efekti</h3>
-                <div id="strip2RgbOptions" class="dynamic-options">
-                    <div class="control-group">
-                        <label for="strip2Effect" data-lang="effect">Efekt</label>
-                        <select id="strip2Effect" onchange="updateUI()">
-                            <option value="solid" data-lang="effectSolid">Statična Boja</option>
-                            <option value="rainbow" data-lang="effectRainbow">Duga</option>
-                            <option value="meteor" data-lang="effectMeteor">Meteor Kiša</option>
-                            <option value="fire" data-lang="effectFire">Vatra</option>
-                        </select>
-                    </div>
-                    <div id="strip2ColorContainer" class="control-group">
-                        <label for="strip2Color" data-lang="color">Boja</label>
-                        <input type="color" id="strip2Color" value="#0000FF">
-                    </div>
-                </div>
-                <div id="strip2WhiteOptions" class="dynamic-options">
-                    <div class="control-group">
-                        <label for="strip2Temp" data-lang="colorTemp">Temperatura Boje <span id="strip2TempValue" class="range-value">4000K</span></label>
-                        <input type="range" id="strip2Temp" min="2700" max="6500" value="4000" oninput="updateRangeValue('strip2TempValue', this.value + 'K')">
-                    </div>
-                </div>
-                <div class="control-group">
-                    <label for="strip2Brightness" data-lang="brightness">Svjetlina <span id="strip2BrightnessValue" class="range-value">80</span></label>
-                    <input type="range" id="strip2Brightness" min="10" max="255" value="80" oninput="updateRangeValue('strip2BrightnessValue', this.value)">
-                </div>
-            </div>
-        </div>
-
-        <div id="saveButtonContainer" style="display: none;">
-            <button onclick="saveSettings()" data-lang="saveButton">Spremi</button>
-            <div id="status" class="status"></div>
-        </div>
-    </div>
-
-    <script>
-        const translations = {
-            hr: {
-                currentLang: "Hrvatski", mainTitle: "Postavke Osvjetljenja", globalSettings: "Globalne Postavke", mainMode: "Glavni način rada", mainModeAuto: "Automatski (preko senzora)", mainModeOn: "Uvijek upaljeno (Ambijentalni)", mainModeOff: "Uvijek ugašeno", stripCountLabel: "Koliko LED traka koristite?", selectOption: "Odaberi...", oneStrip: "Jedna traka", twoStrips: "Dvije trake", strip1Title: "Postavke za Traku 1", strip2Title: "Postavke za Traku 2", physicalSettings: "Fizičke Postavke", stripType: "Tip trake", selectType: "Odaberi tip...", whiteStrip: "Jednobojna Bijela", stripLength: "Dužina trake (m)", stripDensity: "Gustoća LED-ica (LED/m)", sensorOffset: "Pomak senzora (cm)", behaviorSettings: "Ponašanje Senzora", activationMode: "Način paljenja", modeFill: "Cijela traka do korisnika", modeFollow: "Prati korisnika", modeDepart: "Odlazak (pali se ispred)", segmentWidth: "Širina segmenta (broj LED-ica)", animationSpeed: "Brzina animacije (ms)", turnOffTime: "Vrijeme gašenja (sek)", appearanceSettings: "Izgled i Efekti", effect: "Efekt", effectSolid: "Statična Boja", effectRainbow: "Duga", effectMeteor: "Meteor Kiša", effectFire: "Vatra", color: "Boja", colorTemp: "Temperatura Boje", brightness: "Svjetlina", copyButton: "Kopiraj postavke s Trake 1", saveButton: "Spremi", savingStatus: "Spremam...", savedStatus: "Postavke spremljene!", errorStatus: "Greška pri spremanju!"
-            },
-            en: {
-                currentLang: "English", mainTitle: "Light Settings", globalSettings: "Global Settings", mainMode: "Main operating mode", mainModeAuto: "Automatic (via sensor)", mainModeOn: "Always On (Ambient)", mainModeOff: "Always Off", stripCountLabel: "How many LED strips are you using?", selectOption: "Select...", oneStrip: "One strip", twoStrips: "Two strips", strip1Title: "Strip 1 Settings", strip2Title: "Strip 2 Settings", physicalSettings: "Physical Setup", stripType: "Strip type", selectType: "Select type...", whiteStrip: "Single Color White", stripLength: "Strip length (m)", stripDensity: "LED density (LED/m)", sensorOffset: "Sensor offset (cm)", behaviorSettings: "Sensor Behavior", activationMode: "Activation mode", modeFill: "Fill up to user", modeFollow: "Follow the user", modeDepart: "Depart (lights up ahead)", segmentWidth: "Segment width (number of LEDs)", animationSpeed: "Animation speed (ms)", turnOffTime: "Turn-off time (sec)", appearanceSettings: "Appearance & Effects", effect: "Effect", effectSolid: "Solid Color", effectRainbow: "Rainbow", effectMeteor: "Meteor Shower", effectFire: "Fire", color: "Color", colorTemp: "Color Temperature", brightness: "Brightness", copyButton: "Copy settings from Strip 1", saveButton: "Save", savingStatus: "Saving...", savedStatus: "Settings saved!", errorStatus: "Error saving!"
-            }
-        };
-
-        function toggleLanguageMenu() {
-            document.getElementById('language-menu').classList.toggle('show');
-            document.getElementById('language-selector-btn').classList.toggle('open');
-        }
-        
-        function changeLanguage(lang) {
-            document.querySelectorAll('[data-lang]').forEach(el => {
-                const key = el.dataset.lang;
-                if (translations[lang] && translations[lang][key]) el.textContent = translations[lang][key];
-            });
-            document.getElementById('current-lang-text').textContent = translations[lang].currentLang;
-            document.documentElement.lang = lang;
-            toggleLanguageMenu();
-        }
-
-        function updateRangeValue(elementId, value) {
-            const element = document.getElementById(elementId);
-            if (element) element.textContent = value;
-        }
-        
-        function updateUI() {
-            const stripCount = document.getElementById('stripCount').value;
-            
-            function handleStripVisibility(stripNum) {
-                const stripSettings = document.getElementById(`strip${stripNum}Settings`);
-                if (!stripSettings) return;
-
-                const stripType = document.getElementById(`strip${stripNum}Type`).value;
-                const dynamicOptions = document.getElementById(`strip${stripNum}DynamicOptions`);
-                const rgbOptions = document.getElementById(`strip${stripNum}RgbOptions`);
-                const whiteOptions = document.getElementById(`strip${stripNum}WhiteOptions`);
-                const stripMode = document.getElementById(`strip${stripNum}Mode`).value;
-                const followOptions = document.getElementById(`strip${stripNum}FollowOptions`);
-                const stripEffect = document.getElementById(`strip${stripNum}Effect`).value;
-                const colorContainer = document.getElementById(`strip${stripNum}ColorContainer`);
-
-                if (stripCount >= stripNum) {
-                    stripSettings.classList.add('visible');
-                    
-                    if (stripType !== 'none') {
-                        dynamicOptions.style.display = 'block';
-                        rgbOptions.style.display = (stripType === 'ws2812b') ? 'block' : 'none';
-                        whiteOptions.style.display = (stripType === 'white') ? 'block' : 'none';
-                        
-                        if (stripType === 'ws2812b' && colorContainer) colorContainer.style.display = (stripEffect === 'solid') ? 'block' : 'none';
-                        if(followOptions) followOptions.style.display = (stripMode === 'follow') ? 'block' : 'none';
-
-                    } else {
-                        dynamicOptions.style.display = 'none';
-                    }
-                } else {
-                    stripSettings.classList.remove('visible');
-                }
-            }
-
-            handleStripVisibility(1);
-            handleStripVisibility(2);
-
-            document.getElementById('saveButtonContainer').style.display = (stripCount > 0) ? 'block' : 'none';
-        }
-        
-        function copySettings(sourceNum, destNum) {
-            const fields = ['Type', 'Effect', 'Color', 'Temp', 'Brightness', 'WipeSpeed', 'OnTime', 'Length', 'Density', 'Offset', 'Mode', 'FollowWidth'];
-            fields.forEach(field => {
-                const sourceEl = document.getElementById(`strip${sourceNum}${field}`);
-                const destEl = document.getElementById(`strip${destNum}${field}`);
-                if (sourceEl && destEl) {
-                    destEl.value = sourceEl.value;
-                    if (destEl.type === 'range') destEl.dispatchEvent(new Event('input'));
-                }
-            });
-            updateUI();
-            const statusDiv = document.getElementById('status');
-            const lang = document.documentElement.lang || 'hr';
-            statusDiv.textContent = translations[lang].savedStatus;
-            setTimeout(() => { statusDiv.textContent = ''; }, 2000);
-        }
-
-        function getSettingsAsJson() {
-            let settings = {
-                mainMode: document.getElementById('mainMode').value,
-                stripCount: parseInt(document.getElementById('stripCount').value)
-            };
-
-            for (let i = 1; i <= settings.stripCount; i++) {
-                settings[`strip${i}`] = {
-                    type: document.getElementById(`strip${i}Type`).value,
-                    length: parseInt(document.getElementById(`strip${i}Length`).value),
-                    density: parseInt(document.getElementById(`strip${i}Density`).value),
-                    offset: parseInt(document.getElementById(`strip${i}Offset`).value),
-                    mode: document.getElementById(`strip${i}Mode`).value,
-                    followWidth: parseInt(document.getElementById(`strip${i}FollowWidth`).value),
-                    wipeSpeed: parseInt(document.getElementById(`strip${i}WipeSpeed`).value),
-                    onTime: parseInt(document.getElementById(`strip${i}OnTime`).value),
-                    effect: document.getElementById(`strip${i}Effect`).value,
-                    color: document.getElementById(`strip${i}Color`).value,
-                    temp: parseInt(document.getElementById(`strip${i}Temp`).value),
-                    brightness: parseInt(document.getElementById(`strip${i}Brightness`).value)
-                };
-            }
-            return JSON.stringify(settings);
-        }
-
-        function applySettingsFromJson(settings) {
-             if (!settings) return; // Provjera ako su postavke null
-            document.getElementById('mainMode').value = settings.mainMode || 'auto';
-            document.getElementById('stripCount').value = settings.stripCount || 0;
-
-            for (let i = 1; i <= 2; i++) { // Uvijek prođi kroz obje trake
-                const strip = settings[`strip${i}`];
-                if (strip) {
-                    document.getElementById(`strip${i}Type`).value = strip.type || 'none';
-                    document.getElementById(`strip${i}Length`).value = strip.length || 4;
-                    document.getElementById(`strip${i}Density`).value = strip.density || 60;
-                    document.getElementById(`strip${i}Offset`).value = strip.offset || 0;
-                    document.getElementById(`strip${i}Mode`).value = strip.mode || 'fill';
-                    document.getElementById(`strip${i}FollowWidth`).value = strip.followWidth || 20;
-                    document.getElementById(`strip${i}WipeSpeed`).value = strip.wipeSpeed || 50;
-                    document.getElementById(`strip${i}OnTime`).value = strip.onTime || 5;
-                    document.getElementById(`strip${i}Effect`).value = strip.effect || 'solid';
-                    document.getElementById(`strip${i}Color`).value = strip.color || '#0000FF';
-                    document.getElementById(`strip${i}Temp`).value = strip.temp || 4000;
-                    document.getElementById(`strip${i}Brightness`).value = strip.brightness || 80;
-                }
-            }
-            updateUI();
-            ['1', '2'].forEach(num => {
-                const tempEl = document.getElementById(`strip${num}Temp`);
-                if (tempEl) updateRangeValue(`strip${num}TempValue`, tempEl.value + 'K');
-                const brightEl = document.getElementById(`strip${num}Brightness`);
-                if (brightEl) updateRangeValue(`strip${num}BrightnessValue`, brightEl.value);
-            });
-        }
-
-        async function saveSettings() {
-            const statusDiv = document.getElementById('status');
-            const lang = document.documentElement.lang || 'hr';
-            statusDiv.textContent = translations[lang].savingStatus;
-            
-            const settingsJson = getSettingsAsJson();
-            console.log("Slanje postavki:", settingsJson);
-
-            try {
-                const response = await fetch('/save', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: settingsJson
-                });
-                if (response.ok) {
-                    statusDiv.textContent = translations[lang].savedStatus;
-                } else {
-                    throw new Error('Server response was not ok.');
-                }
-            } catch (error) {
-                console.error('Greška:', error);
-                statusDiv.textContent = translations[lang].errorStatus;
-            } finally {
-                setTimeout(() => { statusDiv.textContent = ''; }, 2000);
-            }
-        }
-
-        async function loadSettings() {
-            try {
-                const response = await fetch('/get');
-                if (!response.ok) { throw new Error('Network response was not ok'); }
-                const settings = await response.json();
-                console.log("Primljene postavke:", settings);
-                applySettingsFromJson(settings);
-            } catch (error) {
-                console.error('Greška pri učitavanju postavki:', error);
-                // Ako ne uspijemo učitati, samo primijeni default UI stanje
-                updateUI();
-            }
-        }
-        
-        window.onclick = function(event) {
-            if (!event.target.matches('.language-selector-btn, .language-selector-btn *')) {
-                const menu = document.getElementById("language-menu");
-                if (menu.classList.contains('show')) {
-                    menu.classList.remove('show');
-                    document.getElementById('language-selector-btn').classList.remove('open');
-                }
-            }
-        }
-
-        document.addEventListener('DOMContentLoaded', () => {
-            changeLanguage('hr');
-            toggleLanguageMenu();
-            loadSettings();
-        });
-    </script>
-</body>
-</html>
-)rawliteral";
-// =============================================================================
-// === FUNKCIJE ZA SPREMANJE I ČITANJE POSTAVKI (SPIFFS) ========================
+// === POMOĆNE FUNKCIJE ========================================================
 // =============================================================================
 
-// Funkcija koja parsira HEX string boju (npr. "#FF00AA") u CRGB objekt
+// Parsira HEX string boju (npr. "#FF00AA") u CRGB objekt
 CRGB parseHtmlColor(String colorString) {
   if (colorString.startsWith("#")) {
     colorString = colorString.substring(1);
@@ -682,31 +83,71 @@ CRGB parseHtmlColor(String colorString) {
   return CRGB(number);
 }
 
-// Funkcija koja sprema trenutne postavke u config.json
+// Pretvara CRGB u HEX string (bez #)
+String rgbToHex(CRGB color) {
+  char hexColor[7];
+  sprintf(hexColor, "%02X%02X%02X", color.r, color.g, color.b);
+  return String(hexColor);
+}
+
+// Izračunava broj LED-ica
+void calculateNumLeds(StripSettings &settings) {
+    settings.numLeds = settings.length * settings.density;
+    if (settings.numLeds > MAX_LEDS) {
+        settings.numLeds = MAX_LEDS;
+        Serial.printf("[WARN] Izračunati broj LED-ica (%d) premašuje MAX_LEDS (%d). Ograničeno na %d.\n", settings.length * settings.density, MAX_LEDS, MAX_LEDS);
+    } else if (settings.numLeds <= 0) {
+        settings.numLeds = 1; // Minimalno 1 da izbjegnemo greške
+        Serial.println("[WARN] Izračunati broj LED-ica je 0 ili manji. Postavljeno na 1.");
+    }
+}
+
+// Funkcija za spremanje trenutnih postavki u config.json
 void saveConfiguration() {
-  Serial.println("Spremam konfiguraciju u SPIFFS...");
+  Serial.println("[CONFIG] Spremam konfiguraciju u SPIFFS...");
   File configFile = SPIFFS.open("/config.json", "w");
   if (!configFile) {
-    Serial.println("Greška: Nije moguće otvoriti config.json za pisanje");
+    Serial.println("[ERROR] Nije moguće otvoriti config.json za pisanje.");
     return;
   }
 
   JsonDocument doc;
   doc["mainMode"] = mainMode;
-  doc["stripCount"] = (strip1_settings.enabled ? 1 : 0) + (strip2_settings.enabled ? 1 : 0);
+  int stripCount = 0;
+  if(strip1_settings.enabled) stripCount++;
+  if(strip2_settings.enabled) stripCount++;
+  doc["stripCount"] = stripCount;
+
+  auto saveStripSettings = [&](JsonObject stripObj, const StripSettings& settings) {
+      stripObj["type"] = settings.type;
+      stripObj["length"] = settings.length;
+      stripObj["density"] = settings.density;
+      stripObj["offset"] = settings.offset;
+      stripObj["mode"] = settings.mode;
+      stripObj["followWidth"] = settings.followWidth;
+      stripObj["wipeSpeed"] = settings.wipeSpeed;
+      stripObj["onTime"] = settings.onTime;
+      stripObj["effect"] = settings.effect;
+      stripObj["color"] = settings.colorHex;
+      stripObj["temp"] = settings.colorTemp;
+      stripObj["brightness"] = settings.brightness;
+  };
 
   if (strip1_settings.enabled) {
     JsonObject strip1 = doc.createNestedObject("strip1");
-    strip1["type"] = strip1_settings.type;
-    strip1["length"] = strip1_settings.length;
-    // ... dodaj sve ostale postavke za strip1
+    saveStripSettings(strip1, strip1_settings);
+    Serial.println("[CONFIG] Spremljene SVE postavke za Traku 1.");
   }
-  // ... dodaj logiku i za strip2
+  if (strip2_settings.enabled) {
+    JsonObject strip2 = doc.createNestedObject("strip2");
+    saveStripSettings(strip2, strip2_settings);
+    Serial.println("[CONFIG] Spremljene SVE postavke za Traku 2.");
+  }
 
   if (serializeJson(doc, configFile) == 0) {
-    Serial.println("Greška: Nije moguće zapisati u config.json");
+    Serial.println("[ERROR] Nije moguće zapisati u config.json.");
   } else {
-    Serial.println("Konfiguracija uspješno spremljena.");
+    Serial.println("[CONFIG] Konfiguracija uspješno spremljena.");
   }
   configFile.close();
 }
@@ -714,64 +155,169 @@ void saveConfiguration() {
 // Funkcija koja čita postavke iz config.json pri paljenju
 void loadConfiguration() {
   if (SPIFFS.begin(true)) {
-    Serial.println("SPIFFS montiran.");
+    Serial.println("[SYSTEM] SPIFFS montiran.");
     if (SPIFFS.exists("/config.json")) {
-      Serial.println("Čitam config.json...");
+      Serial.println("[CONFIG] Pronađen config.json, čitam...");
       File configFile = SPIFFS.open("/config.json", "r");
       if (configFile) {
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, configFile);
+        configFile.close();
+
         if (error) {
-          Serial.println("Greška pri parsiranju JSON-a!");
+          Serial.print("[ERROR] Greška pri parsiranju JSON-a: ");
+          Serial.println(error.c_str());
         } else {
-          Serial.println("Konfiguracija uspješno učitana.");
+          Serial.println("[CONFIG] Konfiguracija uspješno učitana.");
           mainMode = doc["mainMode"] | "auto";
           int stripCount = doc["stripCount"] | 0;
 
+          auto loadStripSettings = [&](JsonObjectConst stripObj, StripSettings& settings) {
+              settings.enabled = true;
+              settings.type = stripObj["type"] | "ws2812b";
+              settings.length = stripObj["length"] | 4;
+              settings.density = stripObj["density"] | 60;
+              settings.offset = stripObj["offset"] | 0;
+              settings.mode = stripObj["mode"] | "fill";
+              settings.followWidth = stripObj["followWidth"] | 20;
+              settings.wipeSpeed = stripObj["wipeSpeed"] | 50;
+              settings.onTime = stripObj["onTime"] | 5;
+              settings.effect = stripObj["effect"] | "solid";
+              settings.colorHex = stripObj["color"] | "#0000FF";
+              settings.color = parseHtmlColor(settings.colorHex);
+              settings.colorTemp = stripObj["temp"] | 4000;
+              settings.brightness = stripObj["brightness"] | 80;
+              calculateNumLeds(settings);
+          };
+
           if (stripCount >= 1 && doc.containsKey("strip1")) {
-            strip1_settings.enabled = true;
-            JsonObject strip1 = doc["strip1"];
-            strip1_settings.type = strip1["type"] | "ws2812b";
-            strip1_settings.length = strip1["length"] | 4;
-            // ... učitaj sve ostale postavke
+            loadStripSettings(doc["strip1"], strip1_settings);
+            Serial.println("[CONFIG] Učitane SVE postavke za Traku 1.");
+          } else {
+            strip1_settings.enabled = false;
           }
-           // ... dodaj logiku i za strip2
+
+          if (stripCount >= 2 && doc.containsKey("strip2")) {
+             loadStripSettings(doc["strip2"], strip2_settings);
+             Serial.println("[CONFIG] Učitane SVE postavke za Traku 2.");
+          } else {
+            strip2_settings.enabled = false;
+          }
+
+          uint8_t loaded_brightness = 80; // Default brightness
+          if (strip1_settings.enabled) loaded_brightness = strip1_settings.brightness;
+          else if (strip2_settings.enabled) loaded_brightness = strip2_settings.brightness;
+          FastLED.setBrightness(loaded_brightness);
+          Serial.printf("[LED] Svjetlina postavljena na %d\n", loaded_brightness);
+
         }
-        configFile.close();
       }
     } else {
-      Serial.println("config.json ne postoji, koristim default postavke.");
+      Serial.println("[CONFIG] config.json ne postoji, kreiram i koristim default postavke.");
+      strip1_settings.enabled = true;
+      strip2_settings.enabled = false;
+      calculateNumLeds(strip1_settings);
+      calculateNumLeds(strip2_settings);
+      saveConfiguration();
     }
   } else {
-    Serial.println("Greška: Nije moguće montirati SPIFFS.");
+    Serial.println("[ERROR] Nije moguće montirati SPIFFS.");
   }
 }
 
+// Funkcija za signalizaciju
+void signalAPActive() {
+  Serial.println("[WIFI] Signaliziram da je AP aktivan (treptanje)...");
+  int numLedsToShow = strip1_settings.enabled ? strip1_settings.numLeds : (strip2_settings.enabled ? strip2_settings.numLeds : 10);
+  CRGB* ledsToShow = strip1_settings.enabled ? ledsB : (strip2_settings.enabled ? ledsA : nullptr); // Koristi B za strip1, A za strip2
 
-// Ostale funkcije (signalAPActive, handle... itd.)
-void signalAPActive() { /* ... */ }
-
-void handleRoot() {
-  server.send_P(200, "text/html", HTML_PROGMEM);
+   if (ledsToShow && numLedsToShow > 0) { // Provjeri da li je ledsToShow validan i da li ima LED-ica
+    uint8_t currentBrightness = FastLED.getBrightness(); // Spremi trenutnu svjetlinu
+    FastLED.setBrightness(50); // Smanji za signalizaciju
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 10 && j < numLedsToShow; j++) ledsToShow[j] = CRGB::White;
+        FastLED.show();
+        delay(200);
+        for (int j = 0; j < 10 && j < numLedsToShow; j++) ledsToShow[j] = CRGB::Black;
+        FastLED.show();
+        delay(200);
+    }
+    FastLED.setBrightness(currentBrightness); // Vrati originalnu svjetlinu
+   } else {
+       Serial.println("[WIFI] Nema aktivnih LED traka za signalizaciju.");
+   }
 }
 
+// =============================================================================
+// === WEB SERVER HANDLERI =====================================================
+// =============================================================================
+
+// Funkcija koja poslužuje datoteke iz SPIFFS memorije
+bool handleFileRead(String path) {
+  Serial.print("[WEB] Tražena datoteka: ");
+  Serial.println(path);
+  if (path.endsWith("/")) path = "/index.html"; // Ispravak: korijen je index.html
+
+  String contentType = "text/html";
+  // Odredi Content-Type na temelju ekstenzije
+  if (path.endsWith(".css")) contentType = "text/css";
+  else if (path.endsWith(".js")) contentType = "application/javascript";
+  else if (path.endsWith(".png")) contentType = "image/png";
+  else if (path.endsWith(".jpg")) contentType = "image/jpeg";
+  else if (path.endsWith(".ico")) contentType = "image/x-icon";
+  else if (path.endsWith(".gz")) contentType = "application/x-gzip"; // Za komprimirane datoteke
+
+  if (SPIFFS.exists(path) || SPIFFS.exists(path + ".gz")) { // Provjeri i za komprimiranu verziju
+    if(SPIFFS.exists(path + ".gz")){
+       path += ".gz"; // Ako postoji .gz, posluži nju
+       Serial.print("[WEB] Poslužujem komprimiranu verziju: "); Serial.println(path);
+    }
+    File file = SPIFFS.open(path, "r");
+    // Postavi Cache-Control header za bolji performance
+    server.sendHeader("Cache-Control", "max-age=86400"); // Cache na 1 dan
+    if (path.endsWith(".gz")) server.sendHeader("Content-Encoding", "gzip");
+    server.streamFile(file, contentType);
+    file.close();
+    Serial.println("[WEB] Datoteka poslužena.");
+    return true;
+  }
+  Serial.println("[WEB] Greška: Datoteka nije pronađena.");
+  return false;
+}
+
+// Handler koji šalje TRENUTNE postavke web stranici
 void handleGet() {
+  Serial.println("[WEB] Zahtjev za dohvaćanje postavki ('/get').");
   JsonDocument doc;
+
   doc["mainMode"] = mainMode;
   int stripCount = 0;
-  if (strip1_settings.enabled) stripCount++;
-  if (strip2_settings.enabled) stripCount++;
+  if(strip1_settings.enabled) stripCount++;
+  if(strip2_settings.enabled) stripCount++;
   doc["stripCount"] = stripCount;
+
+  auto fillStripJson = [&](JsonObject stripObj, const StripSettings& settings) {
+      stripObj["type"] = settings.type;
+      stripObj["length"] = settings.length;
+      stripObj["density"] = settings.density;
+      stripObj["offset"] = settings.offset;
+      stripObj["mode"] = settings.mode;
+      stripObj["followWidth"] = settings.followWidth;
+      stripObj["wipeSpeed"] = settings.wipeSpeed;
+      stripObj["onTime"] = settings.onTime;
+      stripObj["effect"] = settings.effect;
+      stripObj["color"] = settings.colorHex;
+      stripObj["temp"] = settings.colorTemp;
+      stripObj["brightness"] = settings.brightness;
+  };
 
   if (strip1_settings.enabled) {
     JsonObject strip1 = doc.createNestedObject("strip1");
-    strip1["type"] = strip1_settings.type;
-    strip1["length"] = strip1_settings.length;
-    strip1["density"] = strip1_settings.density;
-    // ... dodaj sve ostale
+    fillStripJson(strip1, strip1_settings);
   }
    if (strip2_settings.enabled) {
-    // ... dodaj sve za strip2
+    JsonObject strip2 = doc.createNestedObject("strip2");
+    fillStripJson(strip2, strip2_settings);
   }
 
   String output;
@@ -779,17 +325,23 @@ void handleGet() {
   server.send(200, "application/json", output);
 }
 
+// Handler koji prima postavke s web stranice i sprema ih
 void handleSave() {
+  Serial.println("[WEB] Primljen zahtjev za spremanje postavki ('/save').");
   if (server.hasArg("plain") == false) { 
     server.send(400, "text/plain", "Bad Request");
     return;
   }
   String body = server.arg("plain");
-  JsonDocument doc;
+  Serial.print("[WEB] Primljeni podaci: ");
+  Serial.println(body);
+  
+  JsonDocument doc; 
   DeserializationError error = deserializeJson(doc, body);
 
   if (error) {
-    Serial.println("Greška pri parsiranju JSON-a sa stranice!");
+    Serial.print("[ERROR] Greška pri parsiranju JSON-a sa stranice: ");
+    Serial.println(error.c_str());
     server.send(400, "text/plain", "Invalid JSON");
     return;
   }
@@ -797,78 +349,138 @@ void handleSave() {
   mainMode = doc["mainMode"] | "auto";
   int stripCount = doc["stripCount"] | 0;
 
-  strip1_settings.enabled = (stripCount >= 1);
-  strip2_settings.enabled = (stripCount == 2);
+  auto parseStripSettings = [&](JsonObjectConst stripObj, StripSettings& settings) {
+      settings.enabled = true; 
+      settings.type = stripObj["type"] | settings.type;
+      settings.length = stripObj["length"] | settings.length;
+      settings.density = stripObj["density"] | settings.density;
+      settings.offset = stripObj["offset"] | settings.offset;
+      settings.mode = stripObj["mode"] | settings.mode;
+      settings.followWidth = stripObj["followWidth"] | settings.followWidth;
+      settings.wipeSpeed = stripObj["wipeSpeed"] | settings.wipeSpeed;
+      settings.onTime = stripObj["onTime"] | settings.onTime;
+      settings.effect = stripObj["effect"] | settings.effect;
+      settings.colorHex = stripObj["color"] | settings.colorHex;
+      settings.color = parseHtmlColor(settings.colorHex);
+      settings.colorTemp = stripObj["temp"] | settings.colorTemp;
+      settings.brightness = stripObj["brightness"] | settings.brightness;
+      calculateNumLeds(settings);
+      Serial.printf("[CONFIG] Ažurirane postavke: %d LED-ica\n", settings.numLeds);
+  };
 
-  if (strip1_settings.enabled) {
-      JsonObject strip1 = doc["strip1"];
-      strip1_settings.type = strip1["type"] | "ws2812b";
-      strip1_settings.length = strip1["length"] | 4;
-      strip1_settings.density = strip1["density"] | 60;
-      strip1_settings.numLeds = strip1_settings.length * strip1_settings.density;
-      if (strip1_settings.numLeds > MAX_LEDS) strip1_settings.numLeds = MAX_LEDS;
-      // ... spremi sve ostale
+  if (stripCount >= 1 && doc.containsKey("strip1")) {
+      parseStripSettings(doc["strip1"], strip1_settings);
+      FastLED.setBrightness(strip1_settings.brightness); 
+      Serial.println("[CONFIG] Postavke za Traku 1 ažurirane.");
+  } else {
+      strip1_settings.enabled = false;
+      Serial.println("[CONFIG] Traka 1 onemogućena.");
   }
-  // ... spremi sve ostale za strip2
 
-  FastLED.setBrightness(strip1_settings.brightness); // Za sada samo za traku 1
+  if (stripCount == 2 && doc.containsKey("strip2")) {
+      parseStripSettings(doc["strip2"], strip2_settings);
+      if (!strip1_settings.enabled) FastLED.setBrightness(strip2_settings.brightness);
+      Serial.println("[CONFIG] Postavke za Traku 2 ažurirane.");
+  } else {
+      strip2_settings.enabled = false;
+      Serial.println("[CONFIG] Traka 2 onemogućena.");
+  }
   
-  saveConfiguration();
+  saveConfiguration(); // Spremi nove postavke u SPIFFS
   server.send(200, "text/plain", "OK");
 }
 
 
 // =============================================================================
+// === SETUP ===================================================================
+// =============================================================================
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n\n--- Pokretanje Sistema v2.2 ---");
+  Serial.println("\n\n--- Pokretanje Sistema v2.2 (Captive Portal) ---");
 
   esp_task_wdt_init(&wdt_config);
   esp_task_wdt_add(NULL);
+  Serial.println("[SYSTEM] Watchdog inicijaliziran.");
   
   loadConfiguration(); // Učitaj spremljene postavke
 
-  FastLED.addLeds<WS2812B, LED_PIN_A, GRB>(ledsA, strip1_settings.numLeds > 0 ? strip1_settings.numLeds : 1);
-  FastLED.addLeds<WS2812B, LED_PIN_B, GRB>(ledsB, strip2_settings.numLeds > 0 ? strip2_settings.numLeds : 1);
-  FastLED.setBrightness(strip1_settings.brightness); // Postavi učitanu svjetlinu
+  // Ispravak: Provjeri da li je numLeds > 0 prije inicijalizacije
+  if (strip1_settings.numLeds > 0) {
+      FastLED.addLeds<WS2812B, LED_PIN_A, GRB>(ledsA, strip1_settings.numLeds);
+  } else {
+       FastLED.addLeds<WS2812B, LED_PIN_A, GRB>(ledsA, 1); // Fallback na 1 LED
+  }
+  if (strip2_settings.numLeds > 0) {
+     FastLED.addLeds<WS2812B, LED_PIN_B, GRB>(ledsB, strip2_settings.numLeds);
+  } else {
+      FastLED.addLeds<WS2812B, LED_PIN_B, GRB>(ledsB, 1); // Fallback na 1 LED
+  }
+  
   FastLED.clear(true);
   FastLED.show();
+  Serial.println("[LED] Trake inicijalizirane.");
 
   SensorSerialB.begin(115200, SERIAL_8N1, RX_PIN_B, TX_PIN_B);
+  Serial.println("[SENSOR] Senzor B inicijaliziran.");
   
   WiFi.softAP(ssid);
   dnsServer.start(53, "*", WiFi.softAPIP());
+  Serial.print("[WIFI] AP pokrenut. IP adresa: ");
+  Serial.println(WiFi.softAPIP());
+  
   signalAPActive();
 
-  server.on("/", HTTP_GET, handleRoot);
+  // Postavljamo handlere za API
   server.on("/get", HTTP_GET, handleGet);
   server.on("/save", HTTP_POST, handleSave);
-  server.onNotFound([](){ server.send(404, "text/plain", "Not Found"); });
+  
+  // Svi ostali zahtjevi se tretiraju kao zahtjevi za datotekom
+  // OVO JE KLJUČNA PROMJENA ZA CAPTIVE PORTAL:
+  server.onNotFound([](){ 
+    // Ako datoteka ne postoji, ili ako je tražen korijen "/",
+    // uvijek posluži index.html
+    if (!handleFileRead(server.uri())) {
+       Serial.println("[WEB] Datoteka nije pronađena, poslužujem index.html (Captive Portal)");
+       handleFileRead("/index.html"); 
+    }
+  });
   
   server.begin();
-  Serial.println("OK: Web server pokrenut. Sustav je spreman.");
+  Serial.println("[WEB] Server pokrenut. Sistem je spreman.");
 }
 // =============================================================================
 
 // =============================================================================
+// === GLAVNA PETLJA (LOOP) =====================================================
+// =============================================================================
 void loop() {
   esp_task_wdt_reset();
   server.handleClient();
-  dnsServer.processNextRequest();
+  dnsServer.processNextRequest(); // Ovo je ključno za Captive Portal
 
-  // Ovdje će ići provjera za mainMode
+  // 1. Provjera Glavnog Načina Rada
   if (mainMode == "off") {
-      FastLED.clear();
+      fill_solid(ledsA, MAX_LEDS, CRGB::Black);
+      fill_solid(ledsB, MAX_LEDS, CRGB::Black);
       FastLED.show();
-      return; // Ne radi ništa drugo
+      return; 
   }
 
   if (mainMode == "on") {
-      // Logika za "Uvijek upaljeno"
-      // Npr. fill_solid(ledsB, strip1_settings.numLeds, strip1_settings.color);
+      if(strip1_settings.enabled) fill_solid(ledsB, strip1_settings.numLeds, strip1_settings.color);
+      else fill_solid(ledsB, MAX_LEDS, CRGB::Black);
+      
+      if(strip2_settings.enabled) fill_solid(ledsA, strip2_settings.numLeds, strip2_settings.color);
+      else fill_solid(ledsA, MAX_LEDS, CRGB::Black);
+      
+      FastLED.show();
+      return; 
   }
   
-  if (mainMode == "auto" && strip1_settings.enabled) { // Za sada samo za traku 1
+  // 2. Automatski Način Rada (ako je mainMode == "auto")
+  
+  // Čitanje Senzora B (za Traku 1 - ledsB)
+  if (strip1_settings.enabled) {
       while (SensorSerialB.available() > 0) {
         char incomingChar = SensorSerialB.read();
         if (incomingChar == '\n') {
@@ -885,23 +497,27 @@ void loop() {
         }
       }
 
-      int ledsToLight = 0;
+      int ledsToLightB = 0; 
       if (millis() - lastMotionTimeB < (strip1_settings.onTime * 1000UL)) {
-          ledsToLight = map(currentDistanceB, 0, strip1_settings.length * 100, 0, strip1_settings.numLeds);
-          ledsToLight = constrain(ledsToLight, 0, strip1_settings.numLeds); 
+          // TODO: Ovdje dodati logiku za različite modove (fill, follow, depart) i offset
+          ledsToLightB = map(currentDistanceB - strip1_settings.offset, 0, strip1_settings.length * 100, 0, strip1_settings.numLeds);
+          ledsToLightB = constrain(ledsToLightB, 0, strip1_settings.numLeds); 
       }
       
       for (int i = 0; i < strip1_settings.numLeds; i++) {
-        ledsB[i] = (i < ledsToLight) ? strip1_settings.color : CRGB::Black;
+        // TODO: Ovdje dodati logiku za efekte
+        ledsB[i] = (i < ledsToLightB) ? strip1_settings.color : CRGB::Black;
       }
+  } else {
+      fill_solid(ledsB, MAX_LEDS, CRGB::Black);
   }
 
-  if(!strip2_settings.enabled){
-    for (int i = 0; i < MAX_LEDS; i++) {
-      ledsA[i] = CRGB::Black;
-    }
+  // Čitanje Senzora A (za Traku 2 - ledsA) - KADA SE IMPLEMENTIRA V2
+  if (strip2_settings.enabled) {
+     fill_solid(ledsA, strip2_settings.numLeds, strip2_settings.color); // Placeholder
+  } else {
+     fill_solid(ledsA, MAX_LEDS, CRGB::Black);
   }
-  // Dodati logiku za strip2...
 
   FastLED.show();
   delay(10);
