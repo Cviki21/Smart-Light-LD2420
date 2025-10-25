@@ -13,6 +13,19 @@
 #include <ArduinoJson.h>
 #include <SPIFFS.h>
 
+// --- Debug prekidač ---
+#define DEBUG_ENABLED 1 // Postavi na 0 da se isključe svi Serial.* ispisi
+
+#if DEBUG_ENABLED
+  #define DEBUG_PRINT(...) Serial.print(__VA_ARGS__)
+  #define DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__)
+  #define DEBUG_PRINTF(...) Serial.printf(__VA_ARGS__)
+#else
+  #define DEBUG_PRINT(...)
+  #define DEBUG_PRINTLN(...)
+  #define DEBUG_PRINTF(...)
+#endif
+
 // --- Watchdog config ---
 const esp_task_wdt_config_t wdt_config = {
   .timeout_ms = 10000,
@@ -36,6 +49,7 @@ const esp_task_wdt_config_t wdt_config = {
 #define FIRE_HEAT_MIN 160
 #define FIRE_HEAT_MAX 255
 #define METEOR_FADE_RATE 128  // 0-255, higher is slower fade (e.g. 255 = no fade, 128 = 50% fade)
+#define AP_TIMEOUT_MS 180000 // 3 minute
 
 HardwareSerial SensorSerialA(2);
 HardwareSerial SensorSerialB(1);
@@ -151,10 +165,10 @@ void calculateNumLeds(StripSettings &settings) {
   long n = (long)settings.length * (long)settings.density;
   if (n > MAX_LEDS) {
     settings.numLeds = MAX_LEDS;
-    Serial.printf("[WARN] Izračun prevelik, ograničeno na %d\n", MAX_LEDS);
+    DEBUG_PRINTF("[WARN] Izračun prevelik, ograničeno na %d\n", MAX_LEDS);
   } else if (n <= 0) {
     settings.numLeds = 1;
-    Serial.println("[WARN] Izračun <=0, postavljeno na 1");
+    DEBUG_PRINTLN("[WARN] Izračun <=0, postavljeno na 1");
   } else {
     settings.numLeds = (int)n;
   }
@@ -162,10 +176,10 @@ void calculateNumLeds(StripSettings &settings) {
 
 // Save/load using ArduinoJson dynamic doc
 void saveConfiguration() {
-  Serial.println("[CONFIG] Spremam konfiguraciju...");
+  DEBUG_PRINTLN("[CONFIG] Spremam konfiguraciju...");
   File configFile = SPIFFS.open("/config.json", "w");
   if (!configFile) {
-    Serial.println("[ERROR] Ne mogu otvoriti config.json za pisanje");
+    DEBUG_PRINTLN("[ERROR] Ne mogu otvoriti config.json za pisanje");
     return;
   }
   DynamicJsonDocument doc(2048);
@@ -196,29 +210,29 @@ void saveConfiguration() {
     saveStrip(s2, strip2_settings);
   }
 
-  if (serializeJson(doc, configFile) == 0) Serial.println("[ERROR] Neuspjelo pisanje config.json");
-  else Serial.println("[CONFIG] Spremljeno");
+  if (serializeJson(doc, configFile) == 0) DEBUG_PRINTLN("[ERROR] Neuspjelo pisanje config.json");
+  else DEBUG_PRINTLN("[CONFIG] Spremljeno");
   configFile.close();
 }
 
 void loadConfiguration() {
   if (!SPIFFS.begin(true)) {
-    Serial.println("[ERROR] SPIFFS mount failed");
+    DEBUG_PRINTLN("[ERROR] SPIFFS mount failed");
     return;
   }
-  Serial.println("[SYSTEM] SPIFFS montiran.");
+  DEBUG_PRINTLN("[SYSTEM] SPIFFS montiran.");
   if (SPIFFS.exists("/config.json")) {
     File configFile = SPIFFS.open("/config.json", "r");
     if (!configFile) {
-      Serial.println("[WARN] config.json ne moze otvoriti za citanje");
+      DEBUG_PRINTLN("[WARN] config.json ne moze otvoriti za citanje");
       return;
     }
     DynamicJsonDocument doc(4096);
     DeserializationError err = deserializeJson(doc, configFile);
     configFile.close();
     if (err) {
-      Serial.print("[ERROR] JSON parse: ");
-      Serial.println(err.c_str());
+      DEBUG_PRINT("[ERROR] JSON parse: ");
+      DEBUG_PRINTLN(err.c_str());
       return;
     }
     mainMode = doc["mainMode"] | "auto";
@@ -246,15 +260,17 @@ void loadConfiguration() {
     if (doc.containsKey("strip2")) loadStrip(doc["strip2"].as<JsonObjectConst>(), strip2_settings);
     else strip2_settings.enabled = false;
 
-    uint8_t b = 80;
-    if (strip1_settings.enabled) b = strip1_settings.brightness;
-    else if (strip2_settings.enabled) b = strip2_settings.brightness;
-    stripA.setBrightness(b);
-    stripB.setBrightness(b);
-    Serial.printf("[LED] Brightness set to %d\n", b);
-    Serial.println("[CONFIG] Ucitavanje konfiguracije gotovo.");
+    if (strip2_settings.enabled) {
+      stripA.setBrightness(strip2_settings.brightness);
+      DEBUG_PRINTF("[LED] Strip A (2) brightness set to %d\n", strip2_settings.brightness);
+    }
+    if (strip1_settings.enabled) {
+      stripB.setBrightness(strip1_settings.brightness);
+      DEBUG_PRINTF("[LED] Strip B (1) brightness set to %d\n", strip1_settings.brightness);
+    }
+    DEBUG_PRINTLN("[CONFIG] Ucitavanje konfiguracije gotovo.");
   } else {
-    Serial.println("[CONFIG] config.json ne postoji; kreiram default.");
+    DEBUG_PRINTLN("[CONFIG] config.json ne postoji; kreiram default.");
     strip1_settings.enabled = true;
     strip2_settings.enabled = false;
     calculateNumLeds(strip1_settings);
@@ -264,7 +280,7 @@ void loadConfiguration() {
 }
 
 void signalAPActive() {
-  Serial.println("[WIFI] Signaliziram AP (treptanje)...");
+  DEBUG_PRINTLN("[WIFI] Signaliziram AP (treptanje)...");
   Adafruit_NeoPixel *stripToShow = nullptr;
   if (strip1_settings.enabled) {
     stripToShow = &stripB;
@@ -273,7 +289,7 @@ void signalAPActive() {
   }
 
   if (stripToShow == nullptr || stripToShow->numPixels() == 0) {
-    Serial.println("[WIFI] Nema LED traka za signal");
+    DEBUG_PRINTLN("[WIFI] Nema LED traka za signal");
     return;
   }
 
@@ -300,8 +316,8 @@ void signalAPActive() {
 
 bool handleFileRead(String path) {
   if (!isApOn) return false;  // Ne poslužuj datoteke ako je AP ugašen
-  Serial.print("[WEB] Trazi: ");
-  Serial.println(path);
+  DEBUG_PRINT("[WEB] Trazi: ");
+  DEBUG_PRINTLN(path);
   if (path.endsWith("/")) path = "/index.html";
   String contentType = "text/html";
   if (path.endsWith(".css")) contentType = "text/css";
@@ -323,7 +339,7 @@ bool handleFileRead(String path) {
 
 void handleGet() {
   lastClientConnectedTime = millis();  // Resetiraj timer na bilo koji web zahtjev
-  Serial.println("[WEB] /get");
+  DEBUG_PRINTLN("[WEB] /get");
   DynamicJsonDocument doc(1024);
   doc["mainMode"] = mainMode;
   int stripCount = (strip1_settings.enabled ? 1 : 0) + (strip2_settings.enabled ? 1 : 0);
@@ -365,7 +381,7 @@ void handleSave() {
   stripA.show();
   stripB.show();
 
-  Serial.println("[WEB] /save");
+  DEBUG_PRINTLN("[WEB] /save");
   if (!server.hasArg("plain")) {
     server.send(400, "text/plain", "Bad Request");
     return;
@@ -374,8 +390,8 @@ void handleSave() {
   DynamicJsonDocument doc(4096);
   DeserializationError err = deserializeJson(doc, body);
   if (err) {
-    Serial.print("[ERROR] serializeJson: ");
-    Serial.println(err.c_str());
+    DEBUG_PRINT("[ERROR] serializeJson: ");
+    DEBUG_PRINTLN(err.c_str());
     server.send(400, "text/plain", "Invalid JSON");
     return;
   }
@@ -395,7 +411,7 @@ void handleSave() {
     s.colorHex = obj["color"] | s.colorHex;
     s.color = parseHtmlColor(s.colorHex);
     s.brightness = obj["brightness"] | s.brightness;
-    Serial.printf("[CONFIG] strip1_settings.followWidth nakon parsiranja JSON-a iz web sucelja: %d\n", s.followWidth);
+    DEBUG_PRINTF("[CONFIG] strip1_settings.followWidth nakon parsiranja JSON-a iz web sucelja: %d\n", s.followWidth);
 
     calculateNumLeds(s);
   };
@@ -414,16 +430,18 @@ void handleSave() {
   // Apply new lengths
   stripB.updateLength(strip1_settings.enabled ? strip1_settings.numLeds : 0);
   stripA.updateLength(strip2_settings.enabled ? strip2_settings.numLeds : 0);
-  Serial.printf("[LED] Duljina trake B: %d, A: %d\n", stripB.numPixels(), stripA.numPixels());
+  DEBUG_PRINTF("[LED] Duljina trake B: %d, A: %d\n", stripB.numPixels(), stripA.numPixels());
 
   // Apply new brightness
-  uint8_t b = 80;
-  if (strip1_settings.enabled) b = strip1_settings.brightness;
-  else if (strip2_settings.enabled) b = strip2_settings.brightness;
-  stripA.setBrightness(b);
-  stripB.setBrightness(b);
-  Serial.printf("[CONFIG] strip1_settings.followWidth prije spremanja: %d\n", strip1_settings.followWidth);
-  Serial.printf("[LED] Svjetlina postavljena na %d\n", b);
+  if (strip2_settings.enabled) {
+    stripA.setBrightness(strip2_settings.brightness);
+    DEBUG_PRINTF("[LED] Strip A (2) brightness set to %d\n", strip2_settings.brightness);
+  }
+  if (strip1_settings.enabled) {
+    stripB.setBrightness(strip1_settings.brightness);
+    DEBUG_PRINTF("[LED] Strip B (1) brightness set to %d\n", strip1_settings.brightness);
+  }
+  DEBUG_PRINTF("[CONFIG] strip1_settings.followWidth prije spremanja: %d\n", strip1_settings.followWidth);
 
   saveConfiguration();
   server.send(200, "text/plain", "OK");
@@ -456,7 +474,7 @@ void handleWebSocketMessage(uint8_t clientNum, WStype_t type, uint8_t *payload, 
     String cmd = "";
     if (!err && doc.containsKey("command")) cmd = String((const char *)doc["command"]);
     else cmd = msg;
-    Serial.printf("[WS] Client %d command: %s\n", clientNum, cmd.c_str());
+    DEBUG_PRINTF("[WS] Client %d command: %s\n", clientNum, cmd.c_str());
     if (cmd == "toggle_manual") {
       manualOverride = !manualOverride;
       if (!manualOverride) {
@@ -466,12 +484,12 @@ void handleWebSocketMessage(uint8_t clientNum, WStype_t type, uint8_t *payload, 
       }
     } else if (cmd == "toggle_led1") {
       if (manualOverride) led1_on = !led1_on;
-      else Serial.println("[WS] Ignored toggle_led1 - not in manual mode");
+      else DEBUG_PRINTLN("[WS] Ignored toggle_led1 - not in manual mode");
     } else if (cmd == "toggle_led2") {
       if (manualOverride) led2_on = !led2_on;
-      else Serial.println("[WS] Ignored toggle_led2 - not in manual mode");
+      else DEBUG_PRINTLN("[WS] Ignored toggle_led2 - not in manual mode");
     } else {
-      Serial.println("[WS] Nepoznata komanda");
+      DEBUG_PRINTLN("[WS] Nepoznata komanda");
     }
     // odmah pošalji stanje natrag
     sendStateToClients();
@@ -522,9 +540,9 @@ void handleButton() {
 
     // Check for long press (6 seconds)
     if (!longPressHandled && (millis() - buttonPressTime > 6000)) {
-      Serial.println("[BUTTON] Dug pritisak detektiran.");
+      DEBUG_PRINTLN("[BUTTON] Dug pritisak detektiran.");
       if (!isApOn) {
-        Serial.println("[WIFI] Palim AP...");
+        DEBUG_PRINTLN("[WIFI] Palim AP...");
         WiFi.softAP(ssid);
         dnsServer.start(53, "*", WiFi.softAPIP());
         isApOn = true;
@@ -537,18 +555,18 @@ void handleButton() {
     if (lastButtonState == LOW) {  // Just released
       // It's a short press if a long press wasn't handled
       if (!longPressHandled) {
-        Serial.println("[BUTTON] Kratak pritisak.");
+        DEBUG_PRINTLN("[BUTTON] Kratak pritisak.");
         if (mainMode == "auto") {
           mainMode = "on";
-          Serial.println("[BUTTON] Novi mod: Uvijek Upaljeno");
+          DEBUG_PRINTLN("[BUTTON] Novi mod: Uvijek Upaljeno");
           signalModeChange(Adafruit_NeoPixel::Color(0, 255, 0));  // Green for ON
         } else if (mainMode == "on") {
           mainMode = "off";
-          Serial.println("[BUTTON] Novi mod: Uvijek Ugašeno");
+          DEBUG_PRINTLN("[BUTTON] Novi mod: Uvijek Ugašeno");
           signalModeChange(Adafruit_NeoPixel::Color(255, 0, 0));  // Red for OFF
         } else {                                                  // mainMode was "off"
           mainMode = "auto";
-          Serial.println("[BUTTON] Novi mod: Automatski");
+          DEBUG_PRINTLN("[BUTTON] Novi mod: Automatski");
           signalModeChange(Adafruit_NeoPixel::Color(0, 0, 255));  // Blue for AUTO
         }
         saveConfiguration();  // Save the new mode
@@ -566,24 +584,19 @@ void handleAP() {
       lastClientConnectedTime = millis();
     } else {
       // If no one is connected, check if 3 minutes have passed
-      if (millis() - lastClientConnectedTime > 180000) {  // 3 minutes
+      if (millis() - lastClientConnectedTime > AP_TIMEOUT_MS) { // 3 minutes
         WiFi.softAPdisconnect(true);
         dnsServer.stop();
         isApOn = false;
-        Serial.println("[WIFI] AP ugašen zbog neaktivnosti.");
+        DEBUG_PRINTLN("[WIFI] AP ugašen zbog neaktivnosti.");
       }
     }
   }
 }
 
 // Effect helpers
-void effect_solid(Adafruit_NeoPixel &strip, const StripSettings &s, int &lastWritten) {
-  strip.fill(s.color);
-  lastWritten = s.numLeds;
-}
 
-unsigned long lastWipeMillis = 0;
-int wipePos = 0;
+
 uint32_t wheel(byte wheelPos) {
   wheelPos = 255 - wheelPos;
   if (wheelPos < 85) {
@@ -874,14 +887,14 @@ void applyEffectsAndUpdate() {
 // --- setup / loop ---
 void setup() {
   Serial.begin(115200);
-  Serial.println("\n--- Pokretanje Sistema v2.5 ---");
+  DEBUG_PRINTLN("\n--- Pokretanje Sistema v2.5 ---");
 
   // De-inicijaliziraj watchdog ako je ostao aktivan od prijašnjeg rušenja
   esp_task_wdt_deinit();
   // Ponovno inicijaliziraj watchdog
   esp_task_wdt_init(&wdt_config);
   esp_task_wdt_add(NULL);
-  Serial.println("[SYSTEM] Watchdog inicijaliziran.");
+  DEBUG_PRINTLN("[SYSTEM] Watchdog inicijaliziran.");
 
   loadConfiguration();
 
@@ -894,21 +907,21 @@ void setup() {
   stripB.clear();
   stripA.show();
   stripB.show();
-  Serial.println("[LED] NeoPixel Init done.");
+  DEBUG_PRINTLN("[LED] NeoPixel Init done.");
 
   pinMode(TASTER_PIN, INPUT_PULLUP);
-  Serial.println("[SYSTEM] Taster pin inicijaliziran.");
+  DEBUG_PRINTLN("[SYSTEM] Taster pin inicijaliziran.");
 
   SensorSerialA.begin(115200, SERIAL_8N1, RX_PIN_A, TX_PIN_A);
-  Serial.println("[SENSOR] Sensor A init.");
+  DEBUG_PRINTLN("[SENSOR] Sensor A init.");
   SensorSerialB.begin(115200, SERIAL_8N1, RX_PIN_B, TX_PIN_B);
-  Serial.println("[SENSOR] Sensor B init.");
+  DEBUG_PRINTLN("[SENSOR] Sensor B init.");
 
   WiFi.softAP(ssid);
   dnsServer.start(53, "*", WiFi.softAPIP());
   lastClientConnectedTime = millis();  // Inicijalizacija timera
-  Serial.print("[WIFI] AP started IP: ");
-  Serial.println(WiFi.softAPIP());
+  DEBUG_PRINT("[WIFI] AP started IP: ");
+  DEBUG_PRINTLN(WiFi.softAPIP());
 
   signalAPActive();
 
@@ -924,13 +937,12 @@ void setup() {
   webSocket.onEvent([](uint8_t num, WStype_t t, uint8_t *p, size_t l) {
     handleWebSocketMessage(num, t, p, l);
   });
-  Serial.println("[WS] WebSocket server started on port 81.");
+  DEBUG_PRINTLN("[WS] WebSocket server started on port 81.");
 
-  Serial.println("[SYSTEM] Setup complete.");
+  DEBUG_PRINTLN("[SYSTEM] Setup complete.");
 }
 
 unsigned long lastStateSend = 0;
-unsigned long lastSensorProcess = 0;
 void loop() {
   esp_task_wdt_reset();
 
